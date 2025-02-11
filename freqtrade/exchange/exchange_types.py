@@ -63,6 +63,9 @@ class Ticker(TypedDict):
     quoteVolume: float | None
     baseVolume: float | None
     percentage: float | None
+
+    # FIXME: push를 위해 임시로 추가 by 2025-02-11
+    info: dict
     # Several more - only listing required.
 
 

@@ -2049,6 +2049,11 @@ class Exchange:
         Get rate from ticker.
         """
         ticker_rate = ticker[price_side]
+
+        # FIXME: 임시로 트레이드가 되도록 추가 by 2025-02-11
+        if not ticker_rate:
+            ticker_rate = ticker["info"]["trade_price"]
+
         if ticker["last"] and ticker_rate:
             if side == "entry" and ticker_rate > ticker["last"]:
                 balance = conf_strategy.get("price_last_balance", 0.0)
