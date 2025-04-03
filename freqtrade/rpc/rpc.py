@@ -6,13 +6,12 @@ import logging
 from abc import abstractmethod
 from collections.abc import Generator, Sequence
 from datetime import date, datetime, timedelta, timezone
-from math import isnan
 from typing import TYPE_CHECKING, Any
 
 import psutil
 from dateutil.relativedelta import relativedelta
 from dateutil.tz import tzlocal
-from numpy import inf, int64, mean, nan
+from numpy import inf, int64, isnan, mean, nan
 from pandas import DataFrame, NaT
 from sqlalchemy import func, select
 
@@ -31,10 +30,10 @@ from freqtrade.enums import (
     TradingMode,
 )
 from freqtrade.exceptions import ExchangeError, PricingError
-from freqtrade.exchange import timeframe_to_minutes, timeframe_to_msecs
+from freqtrade.exchange import Exchange, timeframe_to_minutes, timeframe_to_msecs
 from freqtrade.exchange.exchange_utils import price_to_precision
 from freqtrade.loggers import bufferHandler
-from freqtrade.persistence import KeyStoreKeys, KeyValueStore, PairLocks, Trade
+from freqtrade.persistence import CustomDataWrapper, KeyStoreKeys, KeyValueStore, PairLocks, Trade
 from freqtrade.persistence.models import PairLock
 from freqtrade.plugins.pairlist.pairlist_helpers import expand_pairlist
 from freqtrade.rpc.fiat_convert import CryptoToFiatConverter
@@ -42,12 +41,13 @@ from freqtrade.rpc.rpc_types import RPCSendMsg
 from freqtrade.util import (
     decimals_per_coin,
     dt_from_ts,
+    dt_humanize_delta,
     dt_now,
+    dt_ts,
     dt_ts_def,
     format_date,
     shorten_date,
 )
-from freqtrade.util.datetime_helpers import dt_humanize_delta
 from freqtrade.wallets import PositionWallet, Wallet
 
 
@@ -1115,31 +1115,70 @@ class RPC:
                 "cancel_order_count": c_count,
             }
 
-    def _rpc_list_custom_data(self, trade_id: int, key: str | None) -> list[dict[str, Any]]:
-        # Query for trade
-        trade = Trade.get_trades(trade_filter=[Trade.id == trade_id]).first()
-        if trade is None:
-            return []
-        # Query custom_data
-        custom_data = []
-        if key:
-            data = trade.get_custom_data(key=key)
-            if data:
-                custom_data = [data]
+    def _rpc_list_custom_data(
+        self, trade_id: int | None = None, key: str | None = None, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch custom data for a specific trade, or all open trades if `trade_id` is not provided.
+        Pagination is applied via `limit` and `offset`.
+
+        Returns an array of dictionaries, each containing:
+        - "trade_id": the ID of the trade (int)
+        - "custom_data": a list of custom data dicts, each with the fields:
+                "id", "key", "type", "value", "created_at", "updated_at"
+        """
+        trades: Sequence[Trade]
+        if trade_id is None:
+            # Get all open trades
+            trades = Trade.session.scalars(
+                Trade.get_trades_query([Trade.is_open.is_(True)])
+                .order_by(Trade.id)
+                .limit(limit)
+                .offset(offset)
+            ).all()
         else:
-            custom_data = trade.get_all_custom_data()
-        return [
-            {
-                "id": data_entry.id,
-                "ft_trade_id": data_entry.ft_trade_id,
-                "cd_key": data_entry.cd_key,
-                "cd_type": data_entry.cd_type,
-                "cd_value": data_entry.cd_value,
-                "created_at": data_entry.created_at,
-                "updated_at": data_entry.updated_at,
-            }
-            for data_entry in custom_data
-        ]
+            trades = Trade.get_trades(trade_filter=[Trade.id == trade_id]).all()
+
+        if not trades:
+            raise RPCException(
+                f"No trade found for trade_id: {trade_id}" if trade_id else "No open trades found."
+            )
+
+        results = []
+        for trade in trades:
+            # Depending on whether a specific key is provided, retrieve custom data accordingly.
+            if key:
+                data = trade.get_custom_data_entry(key=key)
+                # If data exists, wrap it in a list so the output remains consistent.
+                custom_data = [data] if data else []
+            else:
+                custom_data = trade.get_all_custom_data()
+
+            # Format and Append result for the trade if any custom data was found.
+            if custom_data:
+                formatted_custom_data = [
+                    {
+                        "key": data_entry.cd_key,
+                        "type": data_entry.cd_type,
+                        "value": CustomDataWrapper._convert_custom_data(data_entry).value,
+                        "created_at": data_entry.created_at,
+                        "updated_at": data_entry.updated_at,
+                    }
+                    for data_entry in custom_data
+                ]
+                results.append({"trade_id": trade.id, "custom_data": formatted_custom_data})
+
+            # Handle case when there is no custom data found across trades.
+            if not results:
+                message_details = ""
+                if key:
+                    message_details += f"with key '{key}' "
+                message_details += (
+                    f"found for Trade ID: {trade_id}." if trade_id else "found for any open trades."
+                )
+                raise RPCException(f"No custom-data {message_details}")
+
+        return results
 
     def _rpc_performance(self) -> list[dict[str, Any]]:
         """
@@ -1436,7 +1475,12 @@ class RPC:
 
     @staticmethod
     def _rpc_analysed_history_full(
-        config: Config, pair: str, timeframe: str, exchange, selected_cols: list[str] | None
+        config: Config,
+        pair: str,
+        timeframe: str,
+        exchange: Exchange,
+        selected_cols: list[str] | None,
+        live: bool,
     ) -> dict[str, Any]:
         timerange_parsed = TimeRange.parse_timerange(config.get("timerange"))
 
@@ -1444,31 +1488,53 @@ class RPC:
         from freqtrade.data.dataprovider import DataProvider
         from freqtrade.resolvers.strategy_resolver import StrategyResolver
 
-        strategy = StrategyResolver.load_strategy(config)
-        startup_candles = strategy.startup_candle_count
+        strategy_name = ""
+        startup_candles = 0
+        if config.get("strategy"):
+            strategy = StrategyResolver.load_strategy(config)
+            startup_candles = strategy.startup_candle_count
+            strategy_name = strategy.get_strategy_name()
 
-        _data = load_data(
-            datadir=config["datadir"],
-            pairs=[pair],
-            timeframe=timeframe,
-            timerange=timerange_parsed,
-            data_format=config["dataformat_ohlcv"],
-            candle_type=config.get("candle_type_def", CandleType.SPOT),
-            startup_candles=startup_candles,
-        )
-        if pair not in _data:
-            raise RPCException(
-                f"No data for {pair}, {timeframe} in {config.get('timerange')} found."
+        if live:
+            data = exchange.get_historic_ohlcv(
+                pair=pair,
+                timeframe=timeframe,
+                since_ms=timerange_parsed.startts * 1000
+                if timerange_parsed.startts
+                else dt_ts(dt_now() - timedelta(days=30)),
+                is_new_pair=True,  # history is never available - so always treat as new pair
+                candle_type=config.get("candle_type_def", CandleType.SPOT),
+                until_ms=timerange_parsed.stopts,
             )
+        else:
+            _data = load_data(
+                datadir=config["datadir"],
+                pairs=[pair],
+                timeframe=timeframe,
+                timerange=timerange_parsed,
+                data_format=config["dataformat_ohlcv"],
+                candle_type=config.get("candle_type_def", CandleType.SPOT),
+                startup_candles=startup_candles,
+            )
+            if pair not in _data:
+                raise RPCException(
+                    f"No data for {pair}, {timeframe} in {config.get('timerange')} found."
+                )
+            data = _data[pair]
 
-        strategy.dp = DataProvider(config, exchange=exchange, pairlists=None)
-        strategy.ft_bot_start()
+        if config.get("strategy"):
+            strategy.dp = DataProvider(config, exchange=exchange, pairlists=None)
+            strategy.ft_bot_start()
 
-        df_analyzed = strategy.analyze_ticker(_data[pair], {"pair": pair})
-        df_analyzed = trim_dataframe(df_analyzed, timerange_parsed, startup_candles=startup_candles)
+            df_analyzed = strategy.analyze_ticker(data, {"pair": pair})
+            df_analyzed = trim_dataframe(
+                df_analyzed, timerange_parsed, startup_candles=startup_candles
+            )
+        else:
+            df_analyzed = data
 
         return RPC._convert_dataframe_to_dict(
-            strategy.get_strategy_name(),
+            strategy_name,
             pair,
             timeframe,
             df_analyzed.copy(),
