@@ -11,7 +11,7 @@ import re
 from collections.abc import Callable, Coroutine
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from functools import partial, wraps
 from html import escape
 from itertools import chain
@@ -544,13 +544,13 @@ class Telegram(RPCHandler):
         elif msg["type"] == RPCMessageType.PROTECTION_TRIGGER:
             message = (
                 f"*Protection* triggered due to {msg['reason']}. "
-                f"`{msg['pair']}` will be locked until `{msg['lock_end_time']}`."
+                f"`{msg['pair']}` will be locked until `{convert_time(msg['lock_end_time'])}`."
             )
 
         elif msg["type"] == RPCMessageType.PROTECTION_TRIGGER_GLOBAL:
             message = (
                 f"*Protection* triggered due to {msg['reason']}. "
-                f"*All pairs* will be locked until `{msg['lock_end_time']}`."
+                f"*All pairs* will be locked until `{convert_time(msg['lock_end_time'])}`."
             )
 
         elif msg["type"] == RPCMessageType.STATUS:
@@ -1680,7 +1680,12 @@ class Telegram(RPCHandler):
         for locks in chunks(rpc_locks["locks"], 25):
             message = tabulate(
                 [
-                    [lock["id"], lock["pair"], lock["lock_end_time"], lock["reason"]]
+                    [
+                        lock["id"],
+                        lock["pair"],
+                        convert_time(lock["lock_end_time"]),
+                        lock["reason"],
+                    ]
                     for lock in locks
                 ],
                 headers=["ID", "Pair", "Until", "Reason"],
@@ -2183,3 +2188,9 @@ class Telegram(RPCHandler):
             )
         except TelegramError as telegram_err:
             logger.warning("TelegramError: %s! Giving up on that message.", telegram_err.message)
+
+
+def convert_time(time_str: str) -> str:
+    time_format = "%Y-%m-%d %H:%M:%S"
+    time = datetime.strptime(time_str, time_format).replace(tzinfo=timezone.utc)
+    return time.astimezone(timezone(timedelta(hours=9))).strftime(time_format)
