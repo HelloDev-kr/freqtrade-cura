@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, ClassVar
 
 from sqlalchemy import ScalarResult, String, or_, select
@@ -6,9 +6,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from freqtrade.constants import DATETIME_PRINT_FORMAT
 from freqtrade.persistence.base import ModelBase, SessionType
-
-
-kst = timezone(timedelta(hours=9))
 
 
 class PairLock(ModelBase):
@@ -33,8 +30,8 @@ class PairLock(ModelBase):
     active: Mapped[bool] = mapped_column(nullable=False, default=True, index=True)
 
     def __repr__(self) -> str:
-        lock_time = self.lock_time.astimezone(kst).strftime(DATETIME_PRINT_FORMAT)
-        lock_end_time = self.lock_end_time.astimezone(kst).strftime(DATETIME_PRINT_FORMAT)
+        lock_time = self.lock_time.strftime(DATETIME_PRINT_FORMAT)
+        lock_end_time = self.lock_end_time.strftime(DATETIME_PRINT_FORMAT)
         return (
             f"PairLock(id={self.id}, pair={self.pair}, side={self.side}, lock_time={lock_time}, "
             f"lock_end_time={lock_end_time}, reason={self.reason}, active={self.active})"
@@ -71,9 +68,9 @@ class PairLock(ModelBase):
         return {
             "id": self.id,
             "pair": self.pair,
-            "lock_time": self.lock_time.astimezone(kst).strftime(DATETIME_PRINT_FORMAT),
+            "lock_time": self.lock_time.strftime(DATETIME_PRINT_FORMAT),
             "lock_timestamp": int(self.lock_time.replace(tzinfo=timezone.utc).timestamp() * 1000),
-            "lock_end_time": self.lock_end_time.astimezone(kst).strftime(DATETIME_PRINT_FORMAT),
+            "lock_end_time": self.lock_end_time.strftime(DATETIME_PRINT_FORMAT),
             "lock_end_timestamp": int(
                 self.lock_end_time.replace(tzinfo=timezone.utc).timestamp() * 1000
             ),
