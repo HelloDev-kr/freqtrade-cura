@@ -363,7 +363,9 @@ def generate_trading_stats(results: DataFrame) -> dict[str, Any]:
     )
     loser_holding_min = (
         timedelta(minutes=round(losing_duration[losing_duration > 0].min()))
-        if not losing_duration.empty
+        if (
+            not losing_duration.empty and len(losing_duration[losing_duration > 0]) > 0
+        )  # fixed: ValueError: cannot convert float NaN to integer
         else timedelta()
     )
     loser_holding_max = (
