@@ -11,7 +11,7 @@ import re
 from collections.abc import Callable, Coroutine
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from functools import partial, wraps
 from html import escape
 from itertools import chain
@@ -2194,5 +2194,5 @@ class Telegram(RPCHandler):
 
 def convert_time(time_str: str) -> str:
     time_format = "%Y-%m-%d %H:%M:%S"
-    time = datetime.strptime(time_str, time_format).replace(tzinfo=timezone.utc)
+    time = datetime.strptime(time_str, time_format).replace(tzinfo=UTC)
     return time.astimezone(timezone(timedelta(hours=9))).strftime(time_format)
